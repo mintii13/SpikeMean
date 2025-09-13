@@ -1,0 +1,11 @@
+einops
+numpy
+opencv-python
+Pillow
+PyYAML
+scikit-learn
+scipy
+tabulate
+tensorboardX
+torchvision
+torchvision

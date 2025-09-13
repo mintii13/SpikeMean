@@ -1,0 +1,23 @@
+*/__pycache__/*
+*pyc
+.vscode/
+
+experiments/*
+
+.venv/*
+
+data/MVTec-AD/mvtec_anomaly_detection/*
+
+.history
+# PyTorch
+*.pth
+*.pth.tar
+
+# Training outputs
+checkpoints/
+log/
+logs/
+result_*/
+vis_*/
+runs/
+wandb/
