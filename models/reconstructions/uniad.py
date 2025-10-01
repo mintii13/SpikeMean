@@ -157,11 +157,9 @@ class SpatialMemoryModule(nn.Module):
             dict with output and memory information
         """
         feature_dim, batch_size, N_tokens = input_tokens.shape
-        #print(f"Input tokens shape: {input_tokens.shape}")
         
         # Reshape để có spatial dimensions (giả sử feature_dim = height * width)
         H, W = self.height, self.width
-        #assert feature_dim == H * W, f"Feature dim {feature_dim} should equal H*W {H*W}"
         
         # Reshape to spatial format: [N_tokens * batch_size, H, W]
         input_spatial = input_tokens.view(N_tokens * batch_size, H, W)
@@ -307,8 +305,10 @@ class UniADMemory(nn.Module):
         # Output projection
         self.output_proj = nn.Linear(hidden_dim, inplanes[0])
         
-        # Upsampling
-        self.upsample = nn.UpsamplingBilinear2d(scale_factor=instrides[0])
+        # UPDATED: Change from UpsamplingBilinear2d to bicubic interpolation
+        # Upsampling - Using bicubic instead of bilinear
+        # self.upsample = nn.UpsamplingBilinear2d(scale_factor=instrides[0])
+        self.upsample_scale = instrides[0]
 
         # Initialize parameters
         initialize_from_cfg(self, initializer)
@@ -408,7 +408,14 @@ class UniADMemory(nn.Module):
         pred = torch.sqrt(
             torch.sum((feature_rec - feature_align) ** 2, dim=1, keepdim=True)
         )  # B x 1 x H x W
-        pred = self.upsample(pred)  # B x 1 x H x W
+        
+        # UPDATED: Use bicubic interpolation instead of bilinear
+        pred = F.interpolate(
+            pred, 
+            scale_factor=self.upsample_scale, 
+            mode='bicubic', 
+            align_corners=False
+        )  # B x 1 x H x W
         
         # Prepare output dictionary based on available memories
         output_dict = {

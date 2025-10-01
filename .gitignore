@@ -21,3 +21,5 @@ result_*/
 vis_*/
 runs/
 wandb/
+
+pretrained/
