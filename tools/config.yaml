@@ -113,7 +113,7 @@ frozen_layers:
 
 net:
   - name: backbone
-    type: models.backbones.efficientnet_b4
+    type: models.backbones.spiking_resnet18
     frozen: true
     kwargs:
       pretrained: true
@@ -122,6 +122,8 @@ net:
         - 2
         - 3
         - 4
+      spiking_neuron: IFNode
+      # time_steps: 4
   - name: neck
     prev: backbone
     type: models.necks.MFCN

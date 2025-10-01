@@ -345,6 +345,9 @@ def train_one_epoch(
         # measure data loading time
         data_time.update(time.time() - end)
 
+        if hasattr(model, 'backbone') and hasattr(model.backbone, 'reset_spiking_neurons'):
+            model.backbone.reset_spiking_neurons()
+
         # forward
         outputs = model(input)
         loss = 0
@@ -413,6 +416,10 @@ def validate(val_loader, model, single_gpu_mode, wandb_run=None, epoch=None):
     losses = AverageMeter(0)
 
     model.eval()
+
+    if hasattr(model, 'backbone') and hasattr(model.backbone, 'reset_spiking_neurons'):
+        model.backbone.reset_spiking_neurons()
+
     if single_gpu_mode:
         rank = 0
     else:
@@ -430,6 +437,10 @@ def validate(val_loader, model, single_gpu_mode, wandb_run=None, epoch=None):
 
     with torch.no_grad():
         for i, input in enumerate(val_loader):
+
+            if hasattr(model, 'backbone') and hasattr(model.backbone, 'reset_spiking_neurons'):
+                model.backbone.reset_spiking_neurons()
+
             # forward
             outputs = model(input)
             dump(config.evaluator.eval_dir, outputs)
