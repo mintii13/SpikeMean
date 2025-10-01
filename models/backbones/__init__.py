@@ -1,5 +1,6 @@
 from .efficientnet import *  # noqa F401
 from .resnet import *  # noqa F401
+from .spiking_resnet import *
 
 backbone_info = {
     "resnet18": {
@@ -68,5 +69,10 @@ backbone_info = {
         "blocks": [2, 8, 14, 30, 44],
         "planes": [32, 40, 72, 200, 576],
         "strides": [2, 4, 8, 16, 32],
+    },
+    "spiking_resnet18": {
+        "layers": [1, 2, 3, 4],
+        "planes": [64, 128, 256, 512],  # Same as regular ResNet
+        "strides": [4, 8, 16, 32],
     },
 }
