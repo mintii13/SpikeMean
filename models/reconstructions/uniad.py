@@ -305,10 +305,8 @@ class UniADMemory(nn.Module):
         # Output projection
         self.output_proj = nn.Linear(hidden_dim, inplanes[0])
         
-        # UPDATED: Change from UpsamplingBilinear2d to bicubic interpolation
-        # Upsampling - Using bicubic instead of bilinear
-        # self.upsample = nn.UpsamplingBilinear2d(scale_factor=instrides[0])
-        self.upsample_scale = instrides[0]
+        # Upsampling
+        self.upsample = nn.UpsamplingBilinear2d(scale_factor=instrides[0])
 
         # Initialize parameters
         initialize_from_cfg(self, initializer)
@@ -408,14 +406,7 @@ class UniADMemory(nn.Module):
         pred = torch.sqrt(
             torch.sum((feature_rec - feature_align) ** 2, dim=1, keepdim=True)
         )  # B x 1 x H x W
-        
-        # UPDATED: Use bicubic interpolation instead of bilinear
-        pred = F.interpolate(
-            pred, 
-            scale_factor=self.upsample_scale, 
-            mode='bicubic', 
-            align_corners=False
-        )  # B x 1 x H x W
+        pred = self.upsample(pred)  # B x 1 x H x W
         
         # Prepare output dictionary based on available memories
         output_dict = {
