@@ -323,9 +323,14 @@ class UniADMemory(nn.Module):
         return feature_tokens
 
     def forward(self, input):
-        feature_align = input["feature_align"]  # B x C X H x W
+        # Lấy features trực tiếp từ backbone thay vì feature_align
+        if "feature_align" in input:
+            features = input["feature_align"]  # Từ neck
+        else:
+            # Lấy từ backbone
+            features = input["features"][-1]  # Lấy feature cuối cùng từ backbone
         feature_tokens = rearrange(
-            feature_align, "b c h w -> (h w) b c"
+            features, "b c h w -> (h w) b c"
         )  # (H x W) x B x C
         
         # Add jitter during training if enabled
@@ -345,37 +350,9 @@ class UniADMemory(nn.Module):
             feature_tokens, pos=pos_embed
         )  # (H x W) x B x C
         
-        # Memory retrieval based on memory mode
-        memory_features_list = []
-        channel_result = None
-        spatial_result = None
-        
-        if self.use_channel_memory:
-            channel_result = self.channel_memory_module(encoded_tokens)
-            channel_retrieved = channel_result['output']  # (H x W) x B x C
-            memory_features_list.append(channel_retrieved)
-        
-        if self.use_spatial_memory:
-            spatial_result = self.spatial_memory_module(encoded_tokens)
-            spatial_retrieved = spatial_result['output']  # C x B x H x W
-            spatial_retrieved = torch.permute(spatial_retrieved, (2, 1, 0))  # (H x W) x B x C
-            memory_features_list.append(spatial_retrieved)
-        
-        # Fuse memory features based on available memories
-        if len(memory_features_list) == 0:
-            # No memory - use encoded tokens directly
-            memory_features = encoded_tokens
-        elif len(memory_features_list) == 1:
-            # Single memory type
-            memory_features = self.fusion_layer(memory_features_list[0])
-        else:
-            # Multiple memory types - concatenate and fuse
-            combined_features = torch.cat(memory_features_list, dim=-1)  # (H x W) x B x (N*C)
-            memory_features = self.fusion_layer(combined_features)  # (H x W) x B x C
-        
         # Decode features
         decoded_tokens = self.decoder(
-            memory_features, 
+            encoded_tokens, 
             encoded_tokens, 
             pos=pos_embed
         )  # (H x W) x B x C
@@ -402,31 +379,22 @@ class UniADMemory(nn.Module):
                 np.save(os.path.join(save_dir, filename_ + ".npy"), feature_rec_np)
 
         # Compute prediction (reconstruction error)
-        feature_align = torch.sigmoid(feature_align) 
+        if "feature_align" in input:
+            feature_compare = input["feature_align"]
+        else:
+            feature_compare = input["features"][-1]
+        feature_compare = torch.sigmoid(feature_compare) 
         pred = torch.sqrt(
-            torch.sum((feature_rec - feature_align) ** 2, dim=1, keepdim=True)
+            torch.sum((feature_rec - feature_compare) ** 2, dim=1, keepdim=True)
         )  # B x 1 x H x W
         pred = self.upsample(pred)  # B x 1 x H x W
         
         # Prepare output dictionary based on available memories
         output_dict = {
             "feature_rec": feature_rec,
-            "feature_align": feature_align,
+            "feature_align": feature_compare,
             "pred": pred,
         }
-        
-        # Add memory-specific outputs if available
-        if channel_result is not None:
-            output_dict.update({
-                "channel_attention": channel_result['att_weight'],
-                "channel_scores": channel_result['attention_scores'],
-            })
-        
-        if spatial_result is not None:
-            output_dict.update({
-                "spatial_attention": spatial_result['att_weight'],
-                "spatial_ssim": spatial_result['ssim_similarity'],
-            })
         
         return output_dict
 

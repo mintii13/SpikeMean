@@ -118,21 +118,21 @@ net:
     kwargs:
       pretrained: true
       outlayers:
-        - 1
-        - 2
+        # - 1
+        # - 2
         - 3
-        - 4
+        # - 4
       spiking_neuron: IFNode
       # time_steps: 4
-  - name: neck
-    prev: backbone
-    type: models.necks.MFCN
-    kwargs:
-      outstrides:
-        - 16
+  # - name: neck
+  #   prev: backbone
+  #   type: models.necks.MFCN
+  #   kwargs:
+  #     outstrides:
+  #       - 16
   - name: reconstruction
-    prev: neck
-    type: models.reconstructions.UniADMemory
+    prev: backbone
+    type: models.reconstructions.SpikeDrivenUniAD
     kwargs:
       pos_embed_type: learned
       hidden_dim: 256
@@ -146,8 +146,8 @@ net:
       dropout: 0.1
       activation: relu
       normalize_before: false
-      memory_mode: both # Options: 'channel', 'spatial', 'both', 'none'
-      fusion_mode: concat # Options: 'concat', 'add', 'multiply', 'attention', 'gate'
+      # memory_mode: both # Options: 'channel', 'spatial', 'both', 'none'
+      # fusion_mode: concat # Options: 'concat', 'add', 'multiply', 'attention', 'gate'
       channel_memory_size: 256
       spatial_memory_size: 256
       feature_jitter:

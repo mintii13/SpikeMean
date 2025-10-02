@@ -53,19 +53,11 @@ net:
 - frozen: true
   kwargs:
     outlayers:
-    - 1
-    - 2
     - 3
-    - 4
     pretrained: true
+    spiking_neuron: IFNode
   name: backbone
-  type: models.backbones.efficientnet_b4
-- kwargs:
-    outstrides:
-    - 16
-  name: neck
-  prev: backbone
-  type: models.necks.MFCN
+  type: models.backbones.spiking_resnet18
 - kwargs:
     activation: relu
     channel_memory_size: 256
@@ -77,11 +69,9 @@ net:
     feature_size:
     - 14
     - 14
-    fusion_mode: concat
     hidden_dim: 256
     initializer:
       method: xavier_uniform
-    memory_mode: both
     neighbor_mask:
       mask:
       - false
@@ -99,8 +89,8 @@ net:
       save_dir: result_recon
     spatial_memory_size: 256
   name: reconstruction
-  prev: neck
-  type: models.reconstructions.UniADMemory
+  prev: backbone
+  type: models.reconstructions.SpikeDrivenUniAD
 port: 11111
 random_seed: 133
 saver:

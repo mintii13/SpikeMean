@@ -180,31 +180,26 @@ def to_device(input, device="cuda", dtype=None):
 
 
 def update_config(config):
-    # update feature size
-    _, reconstruction_type = config.net[2].type.rsplit(".", 1)
-    if reconstruction_type == "UniAD":
-        input_size = config.dataset.input_size
-        outstride = config.net[1].kwargs.outstrides[0]
-        assert (
-            input_size[0] % outstride == 0
-        ), "input_size must could be divided by outstrides exactly!"
-        assert (
-            input_size[1] % outstride == 0
-        ), "input_size must could be divided by outstrides exactly!"
-        feature_size = [s // outstride for s in input_size]
-        config.net[2].kwargs.feature_size = feature_size
-
-    # update planes & strides
-    backbone_path, backbone_type = config.net[0].type.rsplit(".", 1)
+    # Tìm index của các module
+    backbone_idx = next(i for i, net in enumerate(config.net) if net["name"] == "backbone")
+    neck_idx = next((i for i, net in enumerate(config.net) if net["name"] == "neck"), None)
+    reconstruction_idx = next(i for i, net in enumerate(config.net) if "reconstruction" in net.get("name", "").lower())
+    
+    # ============================================================
+    # BƯỚC 1: Update planes & strides từ backbone TRƯỚC
+    # ============================================================
+    backbone_path, backbone_type = config.net[backbone_idx].type.rsplit(".", 1)
     module = importlib.import_module(backbone_path)
     backbone_info = getattr(module, "backbone_info")
     backbone = backbone_info[backbone_type]
+    
     outblocks = None
     if "efficientnet" in backbone_type:
         outblocks = []
     outstrides = []
     outplanes = []
-    for layer in config.net[0].kwargs.outlayers:
+    
+    for layer in config.net[backbone_idx].kwargs.outlayers:
         if layer not in backbone["layers"]:
             raise ValueError(
                 "only layer {} for backbone {} is allowed, but get {}!".format(
@@ -216,11 +211,44 @@ def update_config(config):
             outblocks.append(backbone["blocks"][idx])
         outstrides.append(backbone["strides"][idx])
         outplanes.append(backbone["planes"][idx])
+    
     if "efficientnet" in backbone_type:
-        config.net[0].kwargs.pop("outlayers")
-        config.net[0].kwargs.outblocks = outblocks
-    config.net[0].kwargs.outstrides = outstrides
-    config.net[1].kwargs.outplanes = [sum(outplanes)]
+        config.net[backbone_idx].kwargs.pop("outlayers")
+        config.net[backbone_idx].kwargs.outblocks = outblocks
+    config.net[backbone_idx].kwargs.outstrides = outstrides  # ✅ Set outstrides TRƯỚC
+    
+    # ============================================================
+    # BƯỚC 2: Update feature size cho reconstruction (SAU khi đã có outstrides)
+    # ============================================================
+    _, reconstruction_type = config.net[reconstruction_idx].type.rsplit(".", 1)
+    if "UniAD" in reconstruction_type:
+        input_size = config.dataset.input_size
+        
+        # Lấy outstride từ neck (nếu có) hoặc backbone
+        if neck_idx is not None:
+            outstride = config.net[neck_idx].kwargs.outstrides[0]
+        else:
+            outstride = outstrides[-1]  # ✅ Dùng outstrides đã tính ở trên
+        
+        assert (
+            input_size[0] % outstride == 0
+        ), "input_size must could be divided by outstrides exactly!"
+        assert (
+            input_size[1] % outstride == 0
+        ), "input_size must could be divided by outstrides exactly!"
+        feature_size = [s // outstride for s in input_size]
+        config.net[reconstruction_idx].kwargs.feature_size = feature_size
+    
+    # ============================================================
+    # BƯỚC 3: Cập nhật inplanes/instrides dựa trên việc có neck hay không
+    # ============================================================
+    if neck_idx is not None:
+        # Có neck: neck nhận từ backbone
+        config.net[neck_idx].kwargs.outplanes = [sum(outplanes)]
+    else:
+        # Không có neck: reconstruction nhận trực tiếp từ backbone
+        config.net[reconstruction_idx].kwargs.inplanes = [outplanes[-1]]
+        config.net[reconstruction_idx].kwargs.instrides = [outstrides[-1]]
 
     return config
 

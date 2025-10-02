@@ -21,8 +21,11 @@ class ModelHelper(nn.Module):
                 self.frozen_layers.append(mname)
             if cfg_subnet.get("prev", None) is not None:
                 prev_module = getattr(self, cfg_subnet["prev"])
-                kwargs["inplanes"] = prev_module.get_outplanes()
-                kwargs["instrides"] = prev_module.get_outstrides()
+                
+                # Xử lý output từ backbone
+                if hasattr(prev_module, 'get_outplanes'):
+                    kwargs["inplanes"] = prev_module.get_outplanes()
+                    kwargs["instrides"] = prev_module.get_outstrides()
 
             module = self.build(mtype, kwargs)
             self.add_module(mname, module)
