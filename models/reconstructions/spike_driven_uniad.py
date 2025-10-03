@@ -245,7 +245,165 @@ class SpikeDrivenBlock(nn.Module):
         
         return x
 
+class SpikeDrivenDecoderLayer(nn.Module):
+    """
+    Spike-Driven Decoder với Cross-Attention
+    """
+    def __init__(self, dim, num_heads, mlp_ratio=4.0, drop=0.0):
+        super().__init__()
+        
+        # 1. Self-attention (như hiện tại)
+        self.self_attn = SpikeDrivenSelfAttention(
+            dim=dim,
+            num_heads=num_heads,
+            qkv_bias=False,
+            attn_drop=drop,
+            proj_drop=drop,
+        )
+        
+        # 2. Cross-attention (MỚI - QUAN TRỌNG)
+        self.cross_attn = SpikeDrivenCrossAttention(
+            dim=dim,
+            num_heads=num_heads,
+            qkv_bias=False,
+            attn_drop=drop,
+            proj_drop=drop,
+        )
+        
+        # 3. MLP
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = SpikeDrivenMLP(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            drop=drop,
+        )
+        
+    def forward(self, tgt, memory):
+        """
+        Args:
+            tgt: [T, B, C, H, W] - decoder queries (noisy/learned)
+            memory: [T, B, C, H, W] - encoder output (clean features)
+        """
+        # Self-attention
+        tgt = self.self_attn(tgt)
+        
+        # Cross-attention với memory từ encoder
+        tgt = self.cross_attn(query=tgt, key=memory, value=memory)
+        
+        # MLP
+        tgt = self.mlp(tgt)
+        
+        return tgt
 
+
+class SpikeDrivenCrossAttention(nn.Module):
+    """
+    Spike-Driven Cross-Attention: Q từ tgt, K/V từ memory
+    """
+    def __init__(self, dim, num_heads=8, qkv_bias=False, 
+                 attn_drop=0.0, proj_drop=0.0):
+        super().__init__()
+        assert dim % num_heads == 0
+        
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        
+        # Q projection (từ tgt)
+        self.q_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
+        self.q_bn = nn.BatchNorm2d(dim)
+        self.q_lif = neuron.LIFNode(tau=2.0, detach_reset=False, 
+                                    surrogate_function=surrogate.ATan(), 
+                                    step_mode='m')
+        
+        # K projection (từ memory)
+        self.k_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
+        self.k_bn = nn.BatchNorm2d(dim)
+        self.k_lif = neuron.LIFNode(tau=2.0, detach_reset=False, 
+                                    surrogate_function=surrogate.ATan(), 
+                                    step_mode='m')
+        
+        # V projection (từ memory)
+        self.v_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
+        self.v_bn = nn.BatchNorm2d(dim)
+        self.v_lif = neuron.LIFNode(tau=2.0, detach_reset=False, 
+                                    surrogate_function=surrogate.ATan(), 
+                                    step_mode='m')
+        
+        # Attention LIF
+        self.attn_lif = neuron.LIFNode(tau=2.0, v_threshold=0.5, 
+                                       detach_reset=False, step_mode='m',
+                                       surrogate_function=surrogate.ATan())
+        
+        # Output projection
+        self.proj_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1)
+        self.proj_bn = nn.BatchNorm2d(dim)
+        
+    def forward(self, query, key, value):
+        """
+        Args:
+            query: [T, B, C, H, W] - từ decoder (tgt)
+            key: [T, B, C, H, W] - từ encoder (memory)
+            value: [T, B, C, H, W] - từ encoder (memory)
+        """
+        T, B, C, H, W = query.shape
+        N = H * W
+        identity = query
+        
+        # Q từ query (tgt)
+        q_flat = query.flatten(0, 1)
+        q_conv_out = self.q_conv(q_flat)
+        q_conv_out = self.q_bn(q_conv_out).reshape(T, B, C, H, W)
+        q_conv_out = self.q_lif(q_conv_out)
+        q = (
+            q_conv_out.flatten(3)
+            .transpose(-1, -2)
+            .reshape(T, B, N, self.num_heads, self.head_dim)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+        )
+        
+        # K từ key (memory)
+        k_flat = key.flatten(0, 1)
+        k_conv_out = self.k_conv(k_flat)
+        k_conv_out = self.k_bn(k_conv_out).reshape(T, B, C, H, W)
+        k_conv_out = self.k_lif(k_conv_out)
+        k = (
+            k_conv_out.flatten(3)
+            .transpose(-1, -2)
+            .reshape(T, B, N, self.num_heads, self.head_dim)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+        )
+        
+        # V từ value (memory)
+        v_flat = value.flatten(0, 1)
+        v_conv_out = self.v_conv(v_flat)
+        v_conv_out = self.v_bn(v_conv_out).reshape(T, B, C, H, W)
+        v_conv_out = self.v_lif(v_conv_out)
+        v = (
+            v_conv_out.flatten(3)
+            .transpose(-1, -2)
+            .reshape(T, B, N, self.num_heads, self.head_dim)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+        )
+        
+        # Spike-Driven Cross-Attention: Q @ K^T × V
+        kv = k.mul(v)  # [T, B, num_heads, N, head_dim]
+        kv = kv.sum(dim=-2, keepdim=True)
+        kv = self.attn_lif(kv)
+        x = q.mul(kv)
+        
+        # Reshape và project
+        x = x.transpose(3, 4).reshape(T, B, C, H, W).contiguous()
+        x = (
+            self.proj_bn(self.proj_conv(x.flatten(0, 1)))
+            .reshape(T, B, C, H, W)
+            .contiguous()
+        )
+        
+        return x + identity
 # ============================================================
 # SPIKE-DRIVEN UniAD
 # ============================================================
@@ -292,16 +450,14 @@ class SpikeDrivenUniAD(nn.Module):
             for _ in range(num_encoder_layers)
         ])
         
-        # Spike-Driven Decoder
+        # ✅ Decoder (sửa lại - bỏ qkv_bias và attn_drop)
         num_decoder_layers = kwargs.get('num_decoder_layers', 4)
         self.decoder = nn.ModuleList([
-            SpikeDrivenBlock(
+            SpikeDrivenDecoderLayer(
                 dim=hidden_dim,
                 num_heads=kwargs.get('nhead', 8),
                 mlp_ratio=kwargs.get('dim_feedforward', 1024) / hidden_dim,
-                qkv_bias=False,
                 drop=kwargs.get('dropout', 0.1),
-                attn_drop=kwargs.get('dropout', 0.1),
             )
             for _ in range(num_decoder_layers)
         ])
@@ -316,73 +472,72 @@ class SpikeDrivenUniAD(nn.Module):
         initialize_from_cfg(self, initializer)
         
     def forward(self, input):
-        # Lấy spike trains từ backbone
+        # Reset neurons
+        functional.reset_net(self)
+        
+        # Lấy features
         if "features" in input:
-            features = input["features"][-1]  # [B, T, C, H, W] từ backbone
+            features = input["features"][-1]
         elif "feature_align" in input:
-            # Fallback nếu không có features (không nên xảy ra)
-            features = input["feature_align"]  # [B, C, H, W]
+            features = input["feature_align"]
             B, C, H, W = features.shape
-            # Convert to spike trains
             x = self.input_proj(features)
             x = self.input_bn(x)
-            features = x.unsqueeze(1).repeat(1, self.timesteps, 1, 1, 1)  # [B, T, hidden_dim, H, W]
+            features = x.unsqueeze(1).repeat(1, self.timesteps, 1, 1, 1)
         else:
             raise ValueError("No features or feature_align in input")
         
-        # Kiểm tra shape
-        if features.dim() == 5:  # [B, T, C, H, W]
+        # Xử lý shape
+        if features.dim() == 5:
             B, T, C, H, W = features.shape
-            self.timesteps = T  # Dùng timesteps từ backbone
+            self.timesteps = T
             
-            # Project features
             features_flat = features.reshape(B * T, C, H, W)
             x = self.input_proj(features_flat)
             x = self.input_bn(x)
-            x = x.reshape(B, T, self.hidden_dim, H, W)  # [B, T, hidden_dim, H, W]
+            x = x.reshape(B, T, self.hidden_dim, H, W)
             x = x.permute(1, 0, 2, 3, 4)  # [T, B, hidden_dim, H, W]
         else:
-            raise ValueError(f"Expected 5D features [B, T, C, H, W], got shape {features.shape}")
+            raise ValueError(f"Expected 5D features, got {features.shape}")
         
         # Input LIF
-        x = self.input_lif(x)  # [T, B, hidden_dim, H, W]
+        x = self.input_lif(x)
         
         # Encoder
+        memory = x
         for encoder_block in self.encoder:
-            x = encoder_block(x)
+            memory = encoder_block(memory)
         
         # Decoder
+        tgt = memory
         for decoder_block in self.decoder:
-            x = decoder_block(x)
+            tgt = decoder_block(tgt=tgt, memory=memory)
         
-        # x shape: [T, B, hidden_dim, H, W]
-        # Rate coding: average qua time
-        x = x.mean(dim=0)  # [B, hidden_dim, H, W]
+        # ✅ Rate coding: dùng tgt thay vì x
+        tgt = tgt.mean(dim=0)  # [B, hidden_dim, H, W]
         
         # Output projection
-        feature_rec = self.output_proj(x)
-        feature_rec = torch.sigmoid(feature_rec)  # [B, C, H, W] continuous
+        feature_rec = self.output_proj(tgt)  # ✅ Dùng tgt
+        feature_rec = torch.sigmoid(feature_rec)
         
-        # Compute rate-coded feature_compare
+        # Compute feature_compare
         if "features" in input:
-            feature_compare_spikes = input["features"][-1]  # [B, T, C, H, W]
-            # Rate coding: average qua time
-            feature_compare = feature_compare_spikes.mean(dim=1)  # [B, C, H, W]
+            feature_compare_spikes = input["features"][-1]
+            feature_compare = feature_compare_spikes.mean(dim=1)
             feature_compare = torch.sigmoid(feature_compare)
         elif "feature_align" in input:
             feature_compare = input["feature_align"]
             feature_compare = torch.sigmoid(feature_compare)
         
-        # MSE loss: [B, C, H, W]
+        # Prediction
         pred = torch.sqrt(
             torch.sum((feature_rec - feature_compare) ** 2, dim=1, keepdim=True)
-        )  # [B, 1, H, W]
+        )
         
-        # Upsample
         pred = F.interpolate(
             pred,
             scale_factor=self.upsample_scale,
-            mode='bicubic',
+            mode='bilinear',  # ✅ Đổi bicubic → bilinear (ổn định hơn)
             align_corners=False
         )
         
