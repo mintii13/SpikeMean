@@ -248,6 +248,9 @@ class SpikingResNet(nn.Module):
         """
         x = input["image"]  # [B, C, H, W]
         B = x.shape[0]
+
+        if not x.requires_grad and self.training:
+            x.requires_grad_(True)
         
         # Repeat input qua T timesteps
         x = x.unsqueeze(1).repeat(1, self.timesteps, 1, 1, 1)  # [B, T, C, H, W]
@@ -264,7 +267,7 @@ class SpikingResNet(nn.Module):
         features = []
         for out in [outs[i] for i in self.outlayers]:
             _, C, H, W = out.shape
-            out = out.reshape(B, self.timesteps, C, H, W)  # [B, T, C, H, W]
+            out = out.contiguous().view(B, self.timesteps, C, H, W)  # view
             features.append(out)
         
         return {"features": features, "strides": self.get_outstrides()}

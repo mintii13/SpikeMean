@@ -153,6 +153,15 @@ def main():
 
     # create model
     model = ModelHelper(config.net)
+    def hook_fn(module, grad_input, grad_output):
+        print(f"HOOK {module.__class__.__name__}: grad_output={grad_output[0] is not None if grad_output else 'None'}")
+
+    # Register hooks
+    model_check = model
+    if hasattr(model_check, 'backbone'):
+        model_check.backbone.layer3.register_backward_hook(hook_fn)
+    if hasattr(model_check, 'reconstruction'):
+        model_check.reconstruction.input_proj.register_backward_hook(hook_fn)
     model.cuda()
     
     # Use DDP only for multi-GPU, DataParallel for single GPU with multiple devices
@@ -174,6 +183,8 @@ def main():
     for module in config.net:
         layers.append(module["name"])
     frozen_layers = config.get("frozen_layers", [])
+    if frozen_layers is None:
+        frozen_layers = []
     active_layers = list(set(layers) ^ set(frozen_layers))
     if rank == 0:
         logger.info("layers: {}".format(layers))
@@ -371,19 +382,49 @@ def train_one_epoch(
         # backward
         optimizer.zero_grad()
         loss.backward()
+        print("\n=== GRADIENT FLOW CHECK ===")
+        model_check = model.module if (use_ddp or isinstance(model, DataParallel)) else model
+
+        # Check reconstruction có gradient
+        if hasattr(model_check, 'reconstruction'):
+            recon = model_check.reconstruction
+            if hasattr(recon, 'input_proj'):
+                if recon.input_proj.weight.grad is not None:
+                    print(f"reconstruction.input_proj grad: {recon.input_proj.weight.grad.norm():.6f}")
+                else:
+                    print("reconstruction.input_proj: NO GRAD")
+
+        # Check backbone có gradient
+        if hasattr(model_check, 'backbone'):
+            backbone = model_check.backbone
+            if hasattr(backbone, 'layer3'):
+                for name, param in backbone.layer3.named_parameters():
+                    if param.grad is not None:
+                        print(f"backbone.layer3.{name} grad: {param.grad.norm():.6f}")
+                        break
+                else:
+                    print("backbone.layer3: NO GRAD at all")
+
+        # Check features có requires_grad
+        outputs_check = model(input)
+        if "features" in outputs_check:
+            feat = outputs_check["features"][-1]
+            print(f"Features requires_grad: {feat.requires_grad}")
+            print(f"Features grad_fn: {feat.grad_fn}")
+        print("=== END CHECK ===\n")
         conv_grads = []
         bn_grads = []
 
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                grad_norm = param.grad.data.norm(2).item()
-                if 'conv' in name or 'linear' in name:
-                    conv_grads.append((name, grad_norm))
-                elif 'bn' in name or 'norm' in name:
-                    bn_grads.append((name, grad_norm))
+        # for name, param in model.named_parameters():
+        #     if param.grad is not None:
+        #         grad_norm = param.grad.data.norm(2).item()
+        #         if 'conv' in name or 'linear' in name:
+        #             conv_grads.append((name, grad_norm))
+        #         elif 'bn' in name or 'norm' in name:
+        #             bn_grads.append((name, grad_norm))
 
-        print(f"Conv/Linear grads: {sorted(conv_grads, key=lambda x: x[1], reverse=True)[:3]}")
-        print(f"BN grads: {sorted(bn_grads, key=lambda x: x[1], reverse=True)[:3]}")
+        # print(f"Conv/Linear grads: {sorted(conv_grads, key=lambda x: x[1], reverse=True)[:3]}")
+        # print(f"BN grads: {sorted(bn_grads, key=lambda x: x[1], reverse=True)[:3]}")
         # update
         if config.trainer.get("clip_max_norm", None):
             max_norm = config.trainer.clip_max_norm

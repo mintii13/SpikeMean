@@ -42,25 +42,25 @@ class SpikeDrivenSelfAttention(nn.Module):
         # Q, K, V projections (Conv1x1)
         self.q_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
         self.q_bn = nn.BatchNorm2d(dim)
-        self.q_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
+        self.q_lif = neuron.LIFNode( tau=2.0, detach_reset=True, surrogate_function=surrogate.ATan(alpha=2.0),  step_mode='m')
         
         self.k_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
         self.k_bn = nn.BatchNorm2d(dim)
-        self.k_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
+        self.k_lif = neuron.LIFNode( tau=2.0, detach_reset=True, surrogate_function=surrogate.ATan(alpha=2.0),  step_mode='m')
         
         self.v_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
         self.v_bn = nn.BatchNorm2d(dim)
-        self.v_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
+        self.v_lif = neuron.LIFNode( tau=2.0, detach_reset=True, surrogate_function=surrogate.ATan(alpha=2.0),  step_mode='m')
         
         # Attention LIF (threshold = 0.5 theo paper)
-        self.attn_lif = neuron.LIFNode(tau=2.0, v_threshold=0.5, detach_reset=False, step_mode='m', surrogate_function=surrogate.ATan())
+        self.attn_lif = neuron.LIFNode(tau=2.0, v_threshold=0.5, detach_reset=True, step_mode='m', surrogate_function=surrogate.ATan(alpha=2.0))
         
         # Output projection
         self.proj_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1)
         self.proj_bn = nn.BatchNorm2d(dim)
         
         # Shortcut LIF (membrane shortcut)
-        self.shortcut_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
+        self.shortcut_lif = neuron.LIFNode( tau=2.0, detach_reset=True, surrogate_function=surrogate.ATan(alpha=2.0),  step_mode='m')
         # Thêm vào SpikeDrivenSelfAttention.__init__
         print(f"Q LIF surrogate: {self.q_lif.surrogate_function}")
         print(f"Surrogate alpha: {getattr(self.q_lif.surrogate_function, 'alpha', 'N/A')}")
@@ -157,12 +157,12 @@ class SpikeDrivenMLP(nn.Module):
         # First FC layer
         self.fc1_conv = nn.Conv2d(in_features, hidden_features, kernel_size=1, stride=1)
         self.fc1_bn = nn.BatchNorm2d(hidden_features)
-        self.fc1_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
+        self.fc1_lif = neuron.LIFNode( tau=2.0, detach_reset=True, surrogate_function=surrogate.ATan(alpha=2.0),  step_mode='m')
         
         # Second FC layer
         self.fc2_conv = nn.Conv2d(hidden_features, out_features, kernel_size=1, stride=1)
         self.fc2_bn = nn.BatchNorm2d(out_features)
-        self.fc2_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
+        self.fc2_lif = neuron.LIFNode( tau=2.0, detach_reset=True, surrogate_function=surrogate.ATan(alpha=2.0),  step_mode='m')
         
         self.c_hidden = hidden_features
         self.c_output = out_features
@@ -312,28 +312,28 @@ class SpikeDrivenCrossAttention(nn.Module):
         # Q projection (từ tgt)
         self.q_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
         self.q_bn = nn.BatchNorm2d(dim)
-        self.q_lif = neuron.LIFNode(tau=2.0, detach_reset=False, 
-                                    surrogate_function=surrogate.ATan(), 
+        self.q_lif = neuron.LIFNode(tau=2.0, detach_reset=True, 
+                                    surrogate_function=surrogate.ATan(alpha=2.0), 
                                     step_mode='m')
         
         # K projection (từ memory)
         self.k_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
         self.k_bn = nn.BatchNorm2d(dim)
-        self.k_lif = neuron.LIFNode(tau=2.0, detach_reset=False, 
-                                    surrogate_function=surrogate.ATan(), 
+        self.k_lif = neuron.LIFNode(tau=2.0, detach_reset=True, 
+                                    surrogate_function=surrogate.ATan(alpha=2.0), 
                                     step_mode='m')
         
         # V projection (từ memory)
         self.v_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
         self.v_bn = nn.BatchNorm2d(dim)
-        self.v_lif = neuron.LIFNode(tau=2.0, detach_reset=False, 
-                                    surrogate_function=surrogate.ATan(), 
+        self.v_lif = neuron.LIFNode(tau=2.0, detach_reset=True, 
+                                    surrogate_function=surrogate.ATan(alpha=2.0), 
                                     step_mode='m')
         
         # Attention LIF
         self.attn_lif = neuron.LIFNode(tau=2.0, v_threshold=0.5, 
-                                       detach_reset=False, step_mode='m',
-                                       surrogate_function=surrogate.ATan())
+                                       detach_reset=True, step_mode='m',
+                                       surrogate_function=surrogate.ATan(alpha=2.0))
         
         # Output projection
         self.proj_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1)
@@ -434,7 +434,7 @@ class SpikeDrivenUniAD(nn.Module):
         # Input projection
         self.input_proj = nn.Conv2d(inplanes[0], hidden_dim, kernel_size=1)
         self.input_bn = nn.BatchNorm2d(hidden_dim)
-        self.input_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
+        self.input_lif = neuron.LIFNode( tau=2.0, detach_reset=True, surrogate_function=surrogate.ATan(alpha=2.0),  step_mode='m')
         
         # Spike-Driven Encoder
         num_encoder_layers = kwargs.get('num_encoder_layers', 4)
@@ -487,6 +487,8 @@ class SpikeDrivenUniAD(nn.Module):
         else:
             raise ValueError("No features or feature_align in input")
         
+        features = features.detach()
+        
         # Xử lý shape
         if features.dim() == 5:
             B, T, C, H, W = features.shape
@@ -537,7 +539,7 @@ class SpikeDrivenUniAD(nn.Module):
         pred = F.interpolate(
             pred,
             scale_factor=self.upsample_scale,
-            mode='bilinear',  # ✅ Đổi bicubic → bilinear (ổn định hơn)
+            mode='bilinear',
             align_corners=False
         )
         
