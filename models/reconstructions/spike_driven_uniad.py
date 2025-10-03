@@ -10,7 +10,8 @@ from einops import rearrange
 from models.initializer import initialize_from_cfg
 from torch import Tensor, nn
 
-from spikingjelly.activation_based import neuron, functional
+# THAY ĐỔI import
+from spikingjelly.activation_based import neuron, functional, surrogate, layer
 
 __all__ = ["SpikeDrivenUniAD"]
 
@@ -41,78 +42,96 @@ class SpikeDrivenSelfAttention(nn.Module):
         # Q, K, V projections (Conv1x1)
         self.q_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
         self.q_bn = nn.BatchNorm2d(dim)
-        self.q_lif = neuron.LIFNode(tau=2.0, detach_reset=True, step_mode='s')
+        self.q_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
         
         self.k_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
         self.k_bn = nn.BatchNorm2d(dim)
-        self.k_lif = neuron.LIFNode(tau=2.0, detach_reset=True, step_mode='s')
+        self.k_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
         
         self.v_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1, bias=False)
         self.v_bn = nn.BatchNorm2d(dim)
-        self.v_lif = neuron.LIFNode(tau=2.0, detach_reset=True, step_mode='s')
+        self.v_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
         
         # Attention LIF (threshold = 0.5 theo paper)
-        self.attn_lif = neuron.LIFNode(tau=2.0, v_threshold=0.5, detach_reset=True, step_mode='s')
+        self.attn_lif = neuron.LIFNode(tau=2.0, v_threshold=0.5, detach_reset=False, step_mode='m', surrogate_function=surrogate.ATan())
         
         # Output projection
         self.proj_conv = nn.Conv2d(dim, dim, kernel_size=1, stride=1)
         self.proj_bn = nn.BatchNorm2d(dim)
         
         # Shortcut LIF (membrane shortcut)
-        self.shortcut_lif = neuron.LIFNode(tau=2.0, detach_reset=True, step_mode='s')
-        
+        self.shortcut_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
+        # Thêm vào SpikeDrivenSelfAttention.__init__
+        print(f"Q LIF surrogate: {self.q_lif.surrogate_function}")
+        print(f"Surrogate alpha: {getattr(self.q_lif.surrogate_function, 'alpha', 'N/A')}")
     def forward(self, x):
         """
         Args:
-            x: [B, C, H, W] - input feature map
+            x: [T, B, C, H, W]
         Returns:
-            output: [B, C, H, W] - attention output
+            x: [T, B, C, H, W]
         """
-        B, C, H, W = x.shape
+        T, B, C, H, W = x.shape
         N = H * W
         identity = x
         
-        # Membrane shortcut: LIF before processing
+        # Shortcut LIF
         x = self.shortcut_lif(x)
         
-        # Generate Q, K, V
-        q = self.q_conv(x)
-        q = self.q_bn(q)
-        q = self.q_lif(q)  # Binary spikes
-        q = q.flatten(2).transpose(1, 2)  # [B, N, C]
-        q = q.reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [B, H, N, D]
+        # Flatten time-batch for Conv/BN
+        x_for_qkv = x.flatten(0, 1)  # [T*B, C, H, W]
         
-        k = self.k_conv(x)
-        k = self.k_bn(k)
-        k = self.k_lif(k)  # Binary spikes
-        k = k.flatten(2).transpose(1, 2)  # [B, N, C]
-        k = k.reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [B, H, N, D]
+        # Q
+        q_conv_out = self.q_conv(x_for_qkv)
+        q_conv_out = self.q_bn(q_conv_out).reshape(T, B, C, H, W).contiguous()
+        q_conv_out = self.q_lif(q_conv_out)
+        q = (
+            q_conv_out.flatten(3)  # [T, B, C, H*W]
+            .transpose(-1, -2)  # [T, B, H*W, C]
+            .reshape(T, B, N, self.num_heads, C // self.num_heads)
+            .permute(0, 1, 3, 2, 4)  # [T, B, num_heads, N, head_dim]
+            .contiguous()
+        )
         
-        v = self.v_conv(x)
-        v = self.v_bn(v)
-        v = self.v_lif(v)  # Binary spikes
-        v = v.flatten(2).transpose(1, 2)  # [B, N, C]
-        v = v.reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [B, H, N, D]
+        # K
+        k_conv_out = self.k_conv(x_for_qkv)
+        k_conv_out = self.k_bn(k_conv_out).reshape(T, B, C, H, W).contiguous()
+        k_conv_out = self.k_lif(k_conv_out)
+        k = (
+            k_conv_out.flatten(3)
+            .transpose(-1, -2)
+            .reshape(T, B, N, self.num_heads, C // self.num_heads)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+        )
         
-        # Spike-Driven Attention: kv = k * v (element-wise mask)
-        kv = k.mul(v)  # [B, H, N, D] - Hadamard product (mask operation)
-        kv = kv.sum(dim=2, keepdim=True)  # [B, H, 1, D] - column sum
-        kv = self.attn_lif(kv)  # Binary attention vector
+        # V
+        v_conv_out = self.v_conv(x_for_qkv)
+        v_conv_out = self.v_bn(v_conv_out).reshape(T, B, C, H, W).contiguous()
+        v_conv_out = self.v_lif(v_conv_out)
+        v = (
+            v_conv_out.flatten(3)
+            .transpose(-1, -2)
+            .reshape(T, B, N, self.num_heads, C // self.num_heads)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+        )  # [T, B, num_heads, N, head_dim]
         
-        # Apply attention: x = q * kv
-        x = q.mul(kv)  # [B, H, N, D] - mask operation
+        # Spike-Driven Attention
+        kv = k.mul(v)  # [T, B, num_heads, N, head_dim]
+        kv = kv.sum(dim=-2, keepdim=True)  # [T, B, num_heads, 1, head_dim]
+        kv = self.attn_lif(kv)
+        x = q.mul(kv)  # [T, B, num_heads, N, head_dim]
         
         # Reshape back
-        x = x.transpose(1, 2).reshape(B, N, C)  # [B, N, C]
-        x = x.transpose(1, 2).reshape(B, C, H, W)  # [B, C, H, W]
+        x = x.transpose(3, 4).reshape(T, B, C, H, W).contiguous()
+        x = (
+            self.proj_bn(self.proj_conv(x.flatten(0, 1)))
+            .reshape(T, B, C, H, W)
+            .contiguous()
+        )
         
-        # Output projection
-        x = self.proj_conv(x)
-        x = self.proj_bn(x)
-        
-        # Residual connection (membrane shortcut)
         x = x + identity
-        
         return x
 
 
@@ -138,12 +157,12 @@ class SpikeDrivenMLP(nn.Module):
         # First FC layer
         self.fc1_conv = nn.Conv2d(in_features, hidden_features, kernel_size=1, stride=1)
         self.fc1_bn = nn.BatchNorm2d(hidden_features)
-        self.fc1_lif = neuron.LIFNode(tau=2.0, detach_reset=True, step_mode='s')
+        self.fc1_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
         
         # Second FC layer
         self.fc2_conv = nn.Conv2d(hidden_features, out_features, kernel_size=1, stride=1)
         self.fc2_bn = nn.BatchNorm2d(out_features)
-        self.fc2_lif = neuron.LIFNode(tau=2.0, detach_reset=True, step_mode='s')
+        self.fc2_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
         
         self.c_hidden = hidden_features
         self.c_output = out_features
@@ -151,27 +170,27 @@ class SpikeDrivenMLP(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: [B, C, H, W]
+            x: [T, B, C, H, W]
         Returns:
-            output: [B, C, H, W]
+            x: [T, B, C, H, W]
         """
+        T, B, C, H, W = x.shape
         identity = x
         
-        # First layer with membrane shortcut
+        # First layer
         x = self.fc1_lif(x)
-        x = self.fc1_conv(x)
-        x = self.fc1_bn(x)
+        x = self.fc1_conv(x.flatten(0, 1))
+        x = self.fc1_bn(x).reshape(T, B, self.c_hidden, H, W).contiguous()
         
         if self.res:
             x = identity + x
             identity = x
         
-        # Second layer with membrane shortcut
+        # Second layer
         x = self.fc2_lif(x)
-        x = self.fc2_conv(x)
-        x = self.fc2_bn(x)
+        x = self.fc2_conv(x.flatten(0, 1))
+        x = self.fc2_bn(x).reshape(T, B, C, H, W).contiguous()
         
-        # Residual
         x = x + identity
         return x
 
@@ -257,7 +276,7 @@ class SpikeDrivenUniAD(nn.Module):
         # Input projection
         self.input_proj = nn.Conv2d(inplanes[0], hidden_dim, kernel_size=1)
         self.input_bn = nn.BatchNorm2d(hidden_dim)
-        self.input_lif = neuron.LIFNode(tau=2.0, detach_reset=True, step_mode='s')
+        self.input_lif = neuron.LIFNode( tau=2.0, detach_reset=False, surrogate_function=surrogate.ATan(),  step_mode='m')
         
         # Spike-Driven Encoder
         num_encoder_layers = kwargs.get('num_encoder_layers', 4)
@@ -297,59 +316,67 @@ class SpikeDrivenUniAD(nn.Module):
         initialize_from_cfg(self, initializer)
         
     def forward(self, input):
-        # Lấy features
-        if "feature_align" in input:
-            features = input["feature_align"]
+        # Lấy spike trains từ backbone
+        if "features" in input:
+            features = input["features"][-1]  # [B, T, C, H, W] từ backbone
+        elif "feature_align" in input:
+            # Fallback nếu không có features (không nên xảy ra)
+            features = input["feature_align"]  # [B, C, H, W]
+            B, C, H, W = features.shape
+            # Convert to spike trains
+            x = self.input_proj(features)
+            x = self.input_bn(x)
+            features = x.unsqueeze(1).repeat(1, self.timesteps, 1, 1, 1)  # [B, T, hidden_dim, H, W]
         else:
-            features = input["features"][-1]
+            raise ValueError("No features or feature_align in input")
         
-        B, C, H, W = features.shape
-        
-        # Project input
-        x = self.input_proj(features)
-        x = self.input_bn(x)
-        
-        # QUAN TRỌNG: Chạy T timesteps và tích lũy
-        spike_outputs = []
-        
-        for t in range(self.timesteps):
-            # Reset tất cả neuron states tại t=0
-            if t == 0:
-                functional.reset_net(self)
+        # Kiểm tra shape
+        if features.dim() == 5:  # [B, T, C, H, W]
+            B, T, C, H, W = features.shape
+            self.timesteps = T  # Dùng timesteps từ backbone
             
-            # Chuyển thành spikes
-            x_spike = self.input_lif(x)
-            
-            # Encode
-            encoded = x_spike
-            for encoder_block in self.encoder:
-                encoded = encoder_block(encoded)
-            
-            # Decode
-            decoded = encoded
-            for decoder_block in self.decoder:
-                decoded = decoder_block(decoded)
-            
-            # Tích lũy output spikes
-            spike_outputs.append(decoded)
+            # Project features
+            features_flat = features.reshape(B * T, C, H, W)
+            x = self.input_proj(features_flat)
+            x = self.input_bn(x)
+            x = x.reshape(B, T, self.hidden_dim, H, W)  # [B, T, hidden_dim, H, W]
+            x = x.permute(1, 0, 2, 3, 4)  # [T, B, hidden_dim, H, W]
+        else:
+            raise ValueError(f"Expected 5D features [B, T, C, H, W], got shape {features.shape}")
         
-        # Rate coding: Trung bình spike count qua các timesteps
-        spike_rate = torch.stack(spike_outputs, dim=0).mean(dim=0)  # [B, C, H, W]
+        # Input LIF
+        x = self.input_lif(x)  # [T, B, hidden_dim, H, W]
         
-        # Project về feature space
-        feature_rec = self.output_proj(spike_rate)
-        feature_rec = torch.sigmoid(feature_rec)
+        # Encoder
+        for encoder_block in self.encoder:
+            x = encoder_block(x)
         
-        # Compute prediction (reconstruction error)
-        if "feature_align" in input:
+        # Decoder
+        for decoder_block in self.decoder:
+            x = decoder_block(x)
+        
+        # x shape: [T, B, hidden_dim, H, W]
+        # Rate coding: average qua time
+        x = x.mean(dim=0)  # [B, hidden_dim, H, W]
+        
+        # Output projection
+        feature_rec = self.output_proj(x)
+        feature_rec = torch.sigmoid(feature_rec)  # [B, C, H, W] continuous
+        
+        # Compute rate-coded feature_compare
+        if "features" in input:
+            feature_compare_spikes = input["features"][-1]  # [B, T, C, H, W]
+            # Rate coding: average qua time
+            feature_compare = feature_compare_spikes.mean(dim=1)  # [B, C, H, W]
+            feature_compare = torch.sigmoid(feature_compare)
+        elif "feature_align" in input:
             feature_compare = input["feature_align"]
-        else:
-            feature_compare = input["features"][-1]
+            feature_compare = torch.sigmoid(feature_compare)
         
-        feature_compare = torch.sigmoid(feature_compare)
+        # MSE loss: [B, C, H, W]
         pred = torch.sqrt(
             torch.sum((feature_rec - feature_compare) ** 2, dim=1, keepdim=True)
-        )
+        )  # [B, 1, H, W]
         
         # Upsample
         pred = F.interpolate(

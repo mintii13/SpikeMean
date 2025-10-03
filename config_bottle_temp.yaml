@@ -56,6 +56,7 @@ net:
     - 3
     pretrained: true
     spiking_neuron: IFNode
+    timesteps: 10
   name: backbone
   type: models.backbones.spiking_resnet18
 - kwargs:
@@ -82,12 +83,13 @@ net:
       - 7
     nhead: 8
     normalize_before: false
-    num_decoder_layers: 4
-    num_encoder_layers: 4
+    num_decoder_layers: 1
+    num_encoder_layers: 1
     pos_embed_type: learned
     save_recon:
       save_dir: result_recon
     spatial_memory_size: 256
+    timesteps: 10
   name: reconstruction
   prev: backbone
   type: models.reconstructions.SpikeDrivenUniAD

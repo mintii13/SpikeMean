@@ -132,9 +132,10 @@ class SpikingResNet(nn.Module):
     def __init__(self, block, layers, outlayers, outstrides, frozen_layers=[], 
                  num_classes=1000, zero_init_residual=False, groups=1, width_per_group=64, 
                  replace_stride_with_dilation=None, norm_layer=None, 
-                 spiking_neuron: callable = None, initializer=None, **kwargs):
+                 spiking_neuron: callable = None, timesteps=4, initializer=None, **kwargs):
         super(SpikingResNet, self).__init__()
         
+        self.timesteps = timesteps
         if norm_layer is None:
             norm_layer = layer.BatchNorm2d
         self._norm_layer = norm_layer
@@ -240,17 +241,32 @@ class SpikingResNet(nn.Module):
         return nn.Sequential(self.conv1, self.bn1, self.sn1, self.maxpool)
 
     def forward(self, input):
-        """Forward pass matching ResNet interface"""
-        x = input["image"]
+        """
+        Forward pass với multi-timestep output
+        Input: {"image": [B, C, H, W]}
+        Output: {"features": [[B, T, C, H, W]], "strides": [...]}
+        """
+        x = input["image"]  # [B, C, H, W]
+        B = x.shape[0]
+        
+        # Repeat input qua T timesteps
+        x = x.unsqueeze(1).repeat(1, self.timesteps, 1, 1, 1)  # [B, T, C, H, W]
+        x = x.reshape(B * self.timesteps, *x.shape[2:])  # [B*T, C, H, W]
         
         outs = []
         for layer_idx in range(0, 5):
             layer = getattr(self, f"layer{layer_idx}", None)
             if layer is not None:
-                x = layer(x)
+                x = layer(x)  # [B*T, C, H, W]
                 outs.append(x)
         
-        features = [outs[i] for i in self.outlayers]
+        # Reshape về [B, T, C, H, W] cho mỗi feature
+        features = []
+        for out in [outs[i] for i in self.outlayers]:
+            _, C, H, W = out.shape
+            out = out.reshape(B, self.timesteps, C, H, W)  # [B, T, C, H, W]
+            features.append(out)
+        
         return {"features": features, "strides": self.get_outstrides()}
 
     def freeze_layer(self):
@@ -283,7 +299,7 @@ class SpikingResNet(nn.Module):
 
 
 def _spiking_resnet(arch, block, layers, pretrained, pretrained_model, progress, 
-                    spiking_neuron, **kwargs):
+                    spiking_neuron, timesteps=4, **kwargs):
     """Build spiking resnet with optional pretrained weights"""
     # Parse string neuron type
     if isinstance(spiking_neuron, str):
@@ -293,7 +309,7 @@ def _spiking_resnet(arch, block, layers, pretrained, pretrained_model, progress,
         spiking_neuron = neuron.IFNode
         logger.info("Using default spiking neuron: IFNode")
     
-    model = SpikingResNet(block, layers, spiking_neuron=spiking_neuron, **kwargs)
+    model = SpikingResNet(block, layers, spiking_neuron=spiking_neuron, timesteps=timesteps, **kwargs)
     
     if pretrained:
         if pretrained_model and os.path.exists(pretrained_model):
@@ -312,42 +328,42 @@ def _spiking_resnet(arch, block, layers, pretrained, pretrained_model, progress,
 
 
 def spiking_resnet18(pretrained=False, pretrained_model=None, progress=True, 
-                     spiking_neuron: callable=None, **kwargs):
+                     spiking_neuron: callable=None, timestep=4, **kwargs):
     """Spiking ResNet-18"""
     return _spiking_resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, 
                           pretrained_model, progress, spiking_neuron, **kwargs)
 
 
 def spiking_resnet34(pretrained=False, pretrained_model=None, progress=True, 
-                     spiking_neuron: callable=None, **kwargs):
+                     spiking_neuron: callable=None, timestep=4, **kwargs):
     """Spiking ResNet-34"""
     return _spiking_resnet('resnet34', BasicBlock, [3, 4, 6, 3], pretrained, 
                           pretrained_model, progress, spiking_neuron, **kwargs)
 
 
 def spiking_resnet50(pretrained=False, pretrained_model=None, progress=True, 
-                     spiking_neuron: callable=None, **kwargs):
+                     spiking_neuron: callable=None, timestep=4, **kwargs):
     """Spiking ResNet-50"""
     return _spiking_resnet('resnet50', Bottleneck, [3, 4, 6, 3], pretrained, 
                           pretrained_model, progress, spiking_neuron, **kwargs)
 
 
 def spiking_resnet101(pretrained=False, pretrained_model=None, progress=True, 
-                      spiking_neuron: callable=None, **kwargs):
+                      spiking_neuron: callable=None, timestep=4, **kwargs):
     """Spiking ResNet-101"""
     return _spiking_resnet('resnet101', Bottleneck, [3, 4, 23, 3], pretrained, 
                           pretrained_model, progress, spiking_neuron, **kwargs)
 
 
 def spiking_resnet152(pretrained=False, pretrained_model=None, progress=True, 
-                      spiking_neuron: callable=None, **kwargs):
+                      spiking_neuron: callable=None, timestep=4, **kwargs):
     """Spiking ResNet-152"""
     return _spiking_resnet('resnet152', Bottleneck, [3, 8, 36, 3], pretrained, 
                           pretrained_model, progress, spiking_neuron, **kwargs)
 
 
 def spiking_resnext50_32x4d(pretrained=False, pretrained_model=None, progress=True, 
-                            spiking_neuron: callable=None, **kwargs):
+                            spiking_neuron: callable=None, timestep=4, **kwargs):
     """Spiking ResNeXt-50 32x4d"""
     kwargs['groups'] = 32
     kwargs['width_per_group'] = 4
@@ -356,7 +372,7 @@ def spiking_resnext50_32x4d(pretrained=False, pretrained_model=None, progress=Tr
 
 
 def spiking_resnext101_32x8d(pretrained=False, pretrained_model=None, progress=True, 
-                             spiking_neuron: callable=None, **kwargs):
+                             spiking_neuron: callable=None, timestep=4, **kwargs):
     """Spiking ResNeXt-101 32x8d"""
     kwargs['groups'] = 32
     kwargs['width_per_group'] = 8
@@ -365,7 +381,7 @@ def spiking_resnext101_32x8d(pretrained=False, pretrained_model=None, progress=T
 
 
 def spiking_wide_resnet50_2(pretrained=False, pretrained_model=None, progress=True, 
-                            spiking_neuron: callable=None, **kwargs):
+                            spiking_neuron: callable=None, timestep=4, **kwargs):
     """Spiking Wide ResNet-50-2"""
     kwargs['width_per_group'] = 64 * 2
     return _spiking_resnet('wide_resnet50_2', Bottleneck, [3, 4, 6, 3], pretrained, 
@@ -373,7 +389,7 @@ def spiking_wide_resnet50_2(pretrained=False, pretrained_model=None, progress=Tr
 
 
 def spiking_wide_resnet101_2(pretrained=False, pretrained_model=None, progress=True, 
-                             spiking_neuron: callable=None, **kwargs):
+                             spiking_neuron: callable=None, timestep=4, **kwargs):
     """Spiking Wide ResNet-101-2"""
     kwargs['width_per_group'] = 64 * 2
     return _spiking_resnet('wide_resnet101_2', Bottleneck, [3, 4, 23, 3], pretrained, 

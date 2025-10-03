@@ -1,6 +1,11 @@
 import argparse
 import logging
 import os
+import sys
+
+# Add project root to path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
 import pprint
 import shutil
 import time
@@ -366,6 +371,19 @@ def train_one_epoch(
         # backward
         optimizer.zero_grad()
         loss.backward()
+        conv_grads = []
+        bn_grads = []
+
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.data.norm(2).item()
+                if 'conv' in name or 'linear' in name:
+                    conv_grads.append((name, grad_norm))
+                elif 'bn' in name or 'norm' in name:
+                    bn_grads.append((name, grad_norm))
+
+        print(f"Conv/Linear grads: {sorted(conv_grads, key=lambda x: x[1], reverse=True)[:3]}")
+        print(f"BN grads: {sorted(bn_grads, key=lambda x: x[1], reverse=True)[:3]}")
         # update
         if config.trainer.get("clip_max_norm", None):
             max_norm = config.trainer.clip_max_norm
