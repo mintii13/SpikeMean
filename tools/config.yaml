@@ -134,6 +134,7 @@ net:
     prev: backbone
     type: models.reconstructions.SpikeDrivenUniAD
     kwargs:
+      time_steps: 4
       pos_embed_type: learned
       hidden_dim: 256
       nhead: 8

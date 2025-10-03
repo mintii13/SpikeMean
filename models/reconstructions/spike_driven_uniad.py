@@ -247,7 +247,7 @@ class SpikeDrivenUniAD(nn.Module):
         super().__init__()
         assert isinstance(inplanes, list) and len(inplanes) == 1
         assert isinstance(instrides, list) and len(instrides) == 1
-        
+        self.timesteps = kwargs.get('timesteps', 4)
         self.feature_size = feature_size
         self.num_queries = feature_size[0] * feature_size[1]
         self.feature_jitter = feature_jitter
@@ -297,30 +297,47 @@ class SpikeDrivenUniAD(nn.Module):
         initialize_from_cfg(self, initializer)
         
     def forward(self, input):
-        # Get features from backbone
+        # Lấy features
         if "feature_align" in input:
             features = input["feature_align"]
         else:
             features = input["features"][-1]
         
+        B, C, H, W = features.shape
+        
         # Project input
-        x = self.input_proj(features)  # [B, C, H, W]
+        x = self.input_proj(features)
         x = self.input_bn(x)
-        x = self.input_lif(x)  # Convert to spikes
         
-        # Reset neuron states at start
-        functional.reset_net(self)
+        # QUAN TRỌNG: Chạy T timesteps và tích lũy
+        spike_outputs = []
         
-        # Encode
-        for encoder_block in self.encoder:
-            x = encoder_block(x)
+        for t in range(self.timesteps):
+            # Reset tất cả neuron states tại t=0
+            if t == 0:
+                functional.reset_net(self)
+            
+            # Chuyển thành spikes
+            x_spike = self.input_lif(x)
+            
+            # Encode
+            encoded = x_spike
+            for encoder_block in self.encoder:
+                encoded = encoder_block(encoded)
+            
+            # Decode
+            decoded = encoded
+            for decoder_block in self.decoder:
+                decoded = decoder_block(decoded)
+            
+            # Tích lũy output spikes
+            spike_outputs.append(decoded)
         
-        # Decode
-        for decoder_block in self.decoder:
-            x = decoder_block(x)
+        # Rate coding: Trung bình spike count qua các timesteps
+        spike_rate = torch.stack(spike_outputs, dim=0).mean(dim=0)  # [B, C, H, W]
         
-        # Output
-        feature_rec = self.output_proj(x)
+        # Project về feature space
+        feature_rec = self.output_proj(spike_rate)
         feature_rec = torch.sigmoid(feature_rec)
         
         # Compute prediction (reconstruction error)

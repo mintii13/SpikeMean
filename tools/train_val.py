@@ -31,7 +31,7 @@ from utils.misc_helper import (
 )
 from utils.optimizer_helper import get_optimizer
 from utils.vis_helper import visualize_compound, visualize_single
-
+from spikingjelly.activation_based import functional
 
 class_name_list = [
     "bottle",
@@ -345,8 +345,8 @@ def train_one_epoch(
         # measure data loading time
         data_time.update(time.time() - end)
 
-        if hasattr(model, 'backbone') and hasattr(model.backbone, 'reset_spiking_neurons'):
-            model.backbone.reset_spiking_neurons()
+        model_to_reset = model.module if (use_ddp or isinstance(model, DataParallel)) else model
+        functional.reset_net(model_to_reset)
 
         # forward
         outputs = model(input)
