@@ -242,35 +242,70 @@ class SpikingResNet(nn.Module):
 
     def forward(self, input):
         """
-        Forward pass với multi-timestep output
-        Input: {"image": [B, C, H, W]}
-        Output: {"features": [[B, T, C, H, W]], "strides": [...]}
+        Output membrane potential nhưng DETACH để freeze
         """
-        x = input["image"]  # [B, C, H, W]
+        x = input["image"]
         B = x.shape[0]
 
         if not x.requires_grad and self.training:
             x.requires_grad_(True)
         
-        # Repeat input qua T timesteps
-        x = x.unsqueeze(1).repeat(1, self.timesteps, 1, 1, 1)  # [B, T, C, H, W]
-        x = x.reshape(B * self.timesteps, *x.shape[2:])  # [B*T, C, H, W]
+        x = x.unsqueeze(1).repeat(1, self.timesteps, 1, 1, 1)
+        x = x.reshape(B * self.timesteps, *x.shape[2:])
         
         outs = []
+        membrane_potentials = []
+        
         for layer_idx in range(0, 5):
             layer = getattr(self, f"layer{layer_idx}", None)
             if layer is not None:
-                x = layer(x)  # [B*T, C, H, W]
+                x = layer(x)
                 outs.append(x)
+                
+                # Extract membrane potential
+                v_mem = self._extract_membrane_from_layer(layer)
+                if v_mem is not None:
+                    _, C, H, W = v_mem.shape
+                    v_mem = v_mem.view(B, self.timesteps, C, H, W)
+                    v_mem_final = v_mem[:, -1, :, :, :]  # [B, C, H, W]
+                    
+                    # ✅ CRITICAL: DETACH để freeze backbone
+                    membrane_potentials.append(v_mem_final.detach())
+                else:
+                    membrane_potentials.append(None)
         
-        # Reshape về [B, T, C, H, W] cho mỗi feature
+        # Reshape spike trains
         features = []
         for out in [outs[i] for i in self.outlayers]:
             _, C, H, W = out.shape
-            out = out.contiguous().view(B, self.timesteps, C, H, W)  # view
-            features.append(out)
+            out = out.contiguous().view(B, self.timesteps, C, H, W)
+            # ✅ DETACH spike trains nếu muốn
+            features.append(out.detach())
         
-        return {"features": features, "strides": self.get_outstrides()}
+        mem_pots = [membrane_potentials[i] for i in self.outlayers]
+        
+        return {
+            "features": features,  # [B, T, C, H, W] - detached
+            "membrane_potentials": mem_pots,  # ✅ [B, C, H, W] - DETACHED
+            "strides": self.get_outstrides()
+        }
+
+    def _extract_membrane_from_layer(self, layer):
+        """Helper to extract membrane potential"""
+        # For layer0 (Sequential)
+        if hasattr(layer, 'sn1'):
+            return layer.sn1.v.clone() if hasattr(layer.sn1, 'v') else None
+        
+        # For layer1-4 (Sequential of Blocks)
+        if isinstance(layer, nn.Sequential) and len(layer) > 0:
+            last_block = layer[-1]
+            # Try different neuron names
+            for attr_name in ['sn3', 'sn2', 'sn1']:
+                if hasattr(last_block, attr_name):
+                    neuron = getattr(last_block, attr_name)
+                    if hasattr(neuron, 'v'):
+                        return neuron.v.clone()
+        return None
 
     def freeze_layer(self):
         """Freeze specified layers"""

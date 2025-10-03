@@ -408,50 +408,45 @@ class SpikeDrivenCrossAttention(nn.Module):
 # SPIKE-DRIVEN UniAD
 # ============================================================
 class SpikeDrivenUniAD(nn.Module):
-    def __init__(
-        self,
-        inplanes,
-        instrides,
-        feature_size,
-        feature_jitter,
-        neighbor_mask,
-        hidden_dim,
-        pos_embed_type,
-        save_recon,
-        initializer,
-        **kwargs,
-    ):
+    def __init__(self, inplanes, instrides, feature_size, hidden_dim, 
+                 timesteps=10, **kwargs):
         super().__init__()
-        assert isinstance(inplanes, list) and len(inplanes) == 1
-        assert isinstance(instrides, list) and len(instrides) == 1
-        self.timesteps = kwargs.get('timesteps', 4)
-        self.feature_size = feature_size
-        self.num_queries = feature_size[0] * feature_size[1]
-        self.feature_jitter = feature_jitter
-        self.save_recon = save_recon
-        self.hidden_dim = hidden_dim
         
-        # Input projection
+        self.timesteps = timesteps
+        self.feature_size = feature_size
+        self.hidden_dim = hidden_dim
+        self.upsample_scale = instrides[0]
+        
+        #  Input projection: membrane potential → hidden_dim
         self.input_proj = nn.Conv2d(inplanes[0], hidden_dim, kernel_size=1)
         self.input_bn = nn.BatchNorm2d(hidden_dim)
-        self.input_lif = neuron.LIFNode( tau=2.0, detach_reset=True, surrogate_function=surrogate.ATan(alpha=2.0),  step_mode='m')
+        self.input_lif = neuron.LIFNode(
+            tau=2.0, detach_reset=True,
+            surrogate_function=surrogate.ATan(alpha=2.0),
+            step_mode='m'
+        )
         
-        # Spike-Driven Encoder
-        num_encoder_layers = kwargs.get('num_encoder_layers', 4)
+        #  IMPORTANT: Normalize membrane potential input
+        # Membrane potential có thể có range rất lớn và không đồng nhất
+        self.membrane_normalizer = nn.Sequential(
+            nn.LayerNorm([inplanes[0]]),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Encoder
+        num_encoder_layers = kwargs.get('num_encoder_layers', 1)
         self.encoder = nn.ModuleList([
             SpikeDrivenBlock(
                 dim=hidden_dim,
                 num_heads=kwargs.get('nhead', 8),
                 mlp_ratio=kwargs.get('dim_feedforward', 1024) / hidden_dim,
-                qkv_bias=False,
                 drop=kwargs.get('dropout', 0.1),
-                attn_drop=kwargs.get('dropout', 0.1),
             )
             for _ in range(num_encoder_layers)
         ])
         
-        # ✅ Decoder (sửa lại - bỏ qkv_bias và attn_drop)
-        num_decoder_layers = kwargs.get('num_decoder_layers', 4)
+        # Decoder
+        num_decoder_layers = kwargs.get('num_decoder_layers', 1)
         self.decoder = nn.ModuleList([
             SpikeDrivenDecoderLayer(
                 dim=hidden_dim,
@@ -462,47 +457,45 @@ class SpikeDrivenUniAD(nn.Module):
             for _ in range(num_decoder_layers)
         ])
         
-        # Output projection
+        #  Output projection: hidden_dim → inplanes[0]
         self.output_proj = nn.Conv2d(hidden_dim, inplanes[0], kernel_size=1)
         
-        # Upsampling
-        self.upsample_scale = instrides[0]
-        
-        # Initialize
-        initialize_from_cfg(self, initializer)
+        #  Output normalizer để match range với input
+        self.output_normalizer = nn.Sequential(
+            nn.LayerNorm([inplanes[0]]),
+            nn.ReLU(inplace=True)
+        )
         
     def forward(self, input):
-        # Reset neurons
         functional.reset_net(self)
         
-        # Lấy features
-        if "features" in input:
-            features = input["features"][-1]
-        elif "feature_align" in input:
-            features = input["feature_align"]
-            B, C, H, W = features.shape
-            x = self.input_proj(features)
-            x = self.input_bn(x)
-            features = x.unsqueeze(1).repeat(1, self.timesteps, 1, 1, 1)
+        #  Get membrane potential from backbone (already detached)
+        if "membrane_potentials" in input and input["membrane_potentials"][-1] is not None:
+            membrane_input = input["membrane_potentials"][-1]  # [B, C, H, W]
+            print(f" Using membrane potential: {membrane_input.shape}")
         else:
-            raise ValueError("No features or feature_align in input")
+            # Fallback: rate coding từ spike trains
+            membrane_input = input["features"][-1].mean(dim=1)
+            print(f" Fallback to rate coding: {membrane_input.shape}")
         
-        features = features.detach()
+        B, C, H, W = membrane_input.shape
         
-        # Xử lý shape
-        if features.dim() == 5:
-            B, T, C, H, W = features.shape
-            self.timesteps = T
-            
-            features_flat = features.reshape(B * T, C, H, W)
-            x = self.input_proj(features_flat)
-            x = self.input_bn(x)
-            x = x.reshape(B, T, self.hidden_dim, H, W)
-            x = x.permute(1, 0, 2, 3, 4)  # [T, B, hidden_dim, H, W]
-        else:
-            raise ValueError(f"Expected 5D features, got {features.shape}")
+        #  CRITICAL: Normalize membrane potential
+        # Membrane values có thể rất lớn và unstable
+        membrane_input_flat = membrane_input.permute(0, 2, 3, 1)  # [B, H, W, C]
+        membrane_input_norm = self.membrane_normalizer(membrane_input_flat)
+        membrane_input_norm = membrane_input_norm.permute(0, 3, 1, 2)  # [B, C, H, W]
         
-        # Input LIF
+        # Store normalized input for loss computation
+        feature_target = membrane_input_norm.detach()
+        
+        # Input projection
+        x = self.input_proj(membrane_input_norm)
+        x = self.input_bn(x)
+        
+        # Create temporal dimension for spike-driven processing
+        x = x.unsqueeze(1).repeat(1, self.timesteps, 1, 1, 1)  # [B, T, hidden, H, W]
+        x = x.permute(1, 0, 2, 3, 4)  # [T, B, hidden, H, W]
         x = self.input_lif(x)
         
         # Encoder
@@ -515,27 +508,24 @@ class SpikeDrivenUniAD(nn.Module):
         for decoder_block in self.decoder:
             tgt = decoder_block(tgt=tgt, memory=memory)
         
-        # ✅ Rate coding: dùng tgt thay vì x
-        tgt = tgt.mean(dim=0)  # [B, hidden_dim, H, W]
+        #  Extract output: Average over time
+        # Spike-driven output → continuous features
+        tgt_avg = tgt.mean(dim=0)  # [B, hidden, H, W]
         
         # Output projection
-        feature_rec = self.output_proj(tgt)  # ✅ Dùng tgt
-        feature_rec = torch.sigmoid(feature_rec)
+        feature_rec = self.output_proj(tgt_avg)  # [B, C, H, W]
         
-        # Compute feature_compare
-        if "features" in input:
-            feature_compare_spikes = input["features"][-1]
-            feature_compare = feature_compare_spikes.mean(dim=1)
-            feature_compare = torch.sigmoid(feature_compare)
-        elif "feature_align" in input:
-            feature_compare = input["feature_align"]
-            feature_compare = torch.sigmoid(feature_compare)
+        #  Normalize output to match input range
+        feature_rec_flat = feature_rec.permute(0, 2, 3, 1)
+        feature_rec_norm = self.output_normalizer(feature_rec_flat)
+        feature_rec_norm = feature_rec_norm.permute(0, 3, 1, 2)
         
-        # Prediction
+        #  Compute anomaly score: MSE between reconstructed and target
         pred = torch.sqrt(
-            torch.sum((feature_rec - feature_compare) ** 2, dim=1, keepdim=True)
+            torch.sum((feature_rec_norm - feature_target) ** 2, dim=1, keepdim=True)
         )
         
+        # Upsample prediction to original resolution
         pred = F.interpolate(
             pred,
             scale_factor=self.upsample_scale,
@@ -544,9 +534,15 @@ class SpikeDrivenUniAD(nn.Module):
         )
         
         return {
-            "feature_rec": feature_rec,
-            "feature_align": feature_compare,
-            "pred": pred,
+            "feature_rec": feature_rec_norm,  # Reconstructed membrane
+            "feature_align": feature_target,  # Target membrane (normalized)
+            "pred": pred,  # Anomaly score
+            "filename": input["filename"],
+            "clsname": input["clsname"],
+            "mask": input["mask"],
+            "height": input["height"],
+            "width": input["width"],
+            "label": input["label"],
         }
 
 
